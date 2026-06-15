@@ -85,7 +85,10 @@ Select option **7** from the menu to install all dependencies automatically. The
 | `sox` | Audio processing utilities |
 | `socat` | Bidirectional TCP relay through Tor SOCKS proxy |
 | `openssl` | AES-256-CBC encryption and decryption |
-| `alsa-utils` | Audio recording and playback (`arecord`, `aplay`) |
+| `pulseaudio-utils` / `libpulse` | Preferred audio capture/playback on PipeWire/PulseAudio (`parec`, `pacat`) |
+| `alsa-utils` | Audio recording/playback fallback (`arecord`, `aplay`) |
+
+> On modern Linux desktops (PipeWire/PulseAudio), TerminalPhone uses `parec`/`pacat` by default and falls back to ALSA (`arecord`/`aplay`) automatically. If you previously got silent calls on Linux, this is the fix for [issue #2](https://github.com/edengilbertus/terminalphone/issues/2).
 
 ### macOS
 

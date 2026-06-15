@@ -227,3 +227,24 @@ so that returning from mid-call settings displays the correct group size immedia
 Version 1.1.6
 
 MacOS Supported Now.
+
+Version 1.1.7
+
+Linux audio backend rework (issue #2). On modern Linux desktops running PipeWire or PulseAudio,
+capturing/playing through the bare ALSA "default" device (arecord/aplay) frequently records silence
+or routes playback to the wrong sink. This is why PC-to-phone calls and the loopback test produced
+correct byte counts but no audible audio, while phone-to-phone worked. TerminalPhone now prefers the
+PulseAudio/PipeWire client tools (parec/pacat) for capture and playback on Linux, automatically
+falling back to ALSA when they are not present or when a specific ALSA device has been chosen in
+Settings. parec/pacat are provided by both PulseAudio and PipeWire (via pipewire-pulse + libpulse).
+
+Loopback test now isolates capture vs. playback. The audio test (option 5) plays the raw recording
+back directly before the Opus/encryption round-trip and prints the active audio backend on Linux,
+so it is clear whether a failure is in the microphone/speaker path or the codec path.
+
+Dependency installer updated to pull the PulseAudio client tools on Linux
+(libpulse on Arch, pulseaudio-utils on Debian/Ubuntu and Fedora).
+
+Documentation/comment fix for the relay forward filter (issue #1): the code already excludes
+client-sent GROUP: messages from the forward whitelist (preventing unauthenticated terminal escape
+injection); the stale comment that still mentioned GROUP: has been corrected.

@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIGURATION
 #=============================================================================
 APP_NAME="TerminalPhone"
-VERSION="1.1.6"
+VERSION="1.1.7"
 BASE_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 DATA_DIR="$BASE_DIR/.terminalphone"
 TOR_DIR="$DATA_DIR/tor_data"
@@ -121,6 +121,30 @@ detect_capture_device() {
 # Detect best ALSA playback device for Linux (PulseAudio/PipeWire > ALSA default)
 detect_playback_device() {
     echo "${ALSA_DEV_PLAYBACK:-default}"
+}
+
+# Cached Linux audio backend: "pulse" (PulseAudio/PipeWire) or "alsa".
+# On modern desktops (PipeWire/PulseAudio) the bare ALSA "default" route often
+# records silence or plays to the wrong sink, which is the root cause of issue #2
+# (PC capture/playback dead while phone-to-phone works). PulseAudio's parec/pacat
+# always target the user's real default source/sink and are provided by both
+# PulseAudio and PipeWire (via pipewire-pulse + libpulse), so prefer them.
+AUDIO_BACKEND=""
+detect_audio_backend() {
+    if [ -n "$AUDIO_BACKEND" ]; then
+        echo "$AUDIO_BACKEND"
+        return
+    fi
+    # Respect an explicit ALSA device override from settings.
+    if [ "${ALSA_DEV_CAPTURE:-default}" != "default" ] || \
+       [ "${ALSA_DEV_PLAYBACK:-default}" != "default" ]; then
+        AUDIO_BACKEND="alsa"
+    elif command -v parec &>/dev/null && command -v pacat &>/dev/null; then
+        AUDIO_BACKEND="pulse"
+    else
+        AUDIO_BACKEND="alsa"
+    fi
+    echo "$AUDIO_BACKEND"
 }
 
 # Portable file size (macOS stat uses -f%z, GNU stat uses -c%s)
@@ -305,9 +329,9 @@ install_deps() {
 
     local deps_needed=()
     local all_deps
-    local pkg_names_apt="tor opus-tools sox socat openssl alsa-utils"
-    local pkg_names_dnf="tor opus-tools sox socat openssl alsa-utils"
-    local pkg_names_pacman="tor opus-tools sox socat openssl alsa-utils"
+    local pkg_names_apt="tor opus-tools sox socat openssl alsa-utils pulseaudio-utils"
+    local pkg_names_dnf="tor opus-tools sox socat openssl alsa-utils pulseaudio-utils"
+    local pkg_names_pacman="tor opus-tools sox socat openssl alsa-utils libpulse"
     local pkg_names_pkg="tor opus-tools sox socat openssl-tool ffmpeg termux-api pulseaudio"
     local pkg_names_brew="tor opus-tools sox socat openssl"
 
@@ -944,6 +968,44 @@ proto_verify() {
 # AUDIO PIPELINE
 #=============================================================================
 
+# Linux: capture raw S16_LE mono PCM for a fixed duration into a file.
+# Uses PulseAudio/PipeWire (parec) when available, else falls back to ALSA.
+linux_capture_timed() {
+    local outfile="$1"
+    local duration="$2"
+    if [ "$(detect_audio_backend)" = "pulse" ]; then
+        timeout "$duration" parec --rate="$SAMPLE_RATE" --channels=1 --format=s16le \
+            > "$outfile" 2>/dev/null || true
+    else
+        arecord -D "$(detect_capture_device)" -f S16_LE -r "$SAMPLE_RATE" -c 1 -t raw \
+            -d "$duration" -q "$outfile" 2>/dev/null
+    fi
+}
+
+# Linux: start a continuous raw capture in the background, writing to $1.
+# Sets REC_PID in the caller's shell so it can be stopped later.
+linux_capture_start() {
+    local outfile="$1"
+    if [ "$(detect_audio_backend)" = "pulse" ]; then
+        parec --rate="$SAMPLE_RATE" --channels=1 --format=s16le > "$outfile" 2>/dev/null &
+    else
+        arecord -D "$(detect_capture_device)" -f S16_LE -r "$SAMPLE_RATE" -c 1 -t raw \
+            -q "$outfile" 2>/dev/null &
+    fi
+    REC_PID=$!
+}
+
+# Linux: play raw S16_LE mono PCM from a file at the given rate.
+linux_play_file() {
+    local infile="$1"
+    local rate="$2"
+    if [ "$(detect_audio_backend)" = "pulse" ]; then
+        pacat --rate="$rate" --channels=1 --format=s16le < "$infile" 2>/dev/null || true
+    else
+        aplay -D "$(detect_playback_device)" -f S16_LE -r "$rate" -c 1 -q "$infile" 2>/dev/null || true
+    fi
+}
+
 # Record a timed chunk of raw audio (used by audio test)
 audio_record() {
     local outfile="$1"
@@ -964,10 +1026,7 @@ audio_record() {
     elif [ $IS_MACOS -eq 1 ]; then
         rec -q -t raw -r "$SAMPLE_RATE" -e signed -b 16 -c 1 "$outfile" trim 0 "$duration" 2>/dev/null
     else
-        local _dev
-        _dev=$(detect_capture_device)
-        arecord -D "$_dev" -f S16_LE -r "$SAMPLE_RATE" -c 1 -t raw -d "$duration" \
-            -q "$outfile" 2>/dev/null
+        linux_capture_timed "$outfile" "$duration"
     fi
 }
 
@@ -987,10 +1046,7 @@ start_recording() {
         REC_PID=$!
     else
         REC_FILE="$AUDIO_DIR/msg_${_id}.tmp"
-        local _dev
-        _dev=$(detect_capture_device)
-        arecord -D "$_dev" -f S16_LE -r "$SAMPLE_RATE" -c 1 -t raw -q "$REC_FILE" 2>/dev/null &
-        REC_PID=$!
+        linux_capture_start "$REC_FILE"
     fi
 }
 
@@ -1109,10 +1165,8 @@ audio_play() {
     local rate="${2:-48000}"
 
     if [ $IS_TERMUX -eq 0 ] && [ $IS_MACOS -eq 0 ]; then
-        # Linux: use ALSA aplay with detected device
-        local _pdev
-        _pdev=$(detect_playback_device)
-        aplay -D "$_pdev" -f S16_LE -r "$rate" -c 1 -q "$infile" 2>/dev/null
+        # Linux: PulseAudio/PipeWire (pacat) when available, else ALSA aplay
+        linux_play_file "$infile" "$rate"
     else
         # macOS / Termux: use sox play
         play -q -t raw -r "$rate" -e signed -b 16 -c 1 "$infile" 2>/dev/null || true
@@ -1129,8 +1183,12 @@ play_chunk() {
         # macOS / Termux: pipe decode directly to sox play
         opusdec --quiet --rate 48000 "$opus_file" - 2>/dev/null | \
             play -q -t raw -r 48000 -e signed -b 16 -c 1 - 2>/dev/null || true
+    elif [ "$(detect_audio_backend)" = "pulse" ]; then
+        # Linux (PulseAudio/PipeWire): pipe decode directly to pacat
+        opusdec --quiet --rate 48000 "$opus_file" - 2>/dev/null | \
+            pacat --rate=48000 --channels=1 --format=s16le 2>/dev/null || true
     else
-        # Linux: pipe decode directly to aplay with detected device
+        # Linux (ALSA): pipe decode directly to aplay with detected device
         local _pdev
         _pdev=$(detect_playback_device)
         opusdec --quiet --rate 48000 "$opus_file" - 2>/dev/null | \
@@ -1586,7 +1644,10 @@ while IFS= read -r line; do
     # Strip HMAC wrapper if present (nonce:payload|sig → payload)
     local_payload="$line"
     case "$line" in *"|"*) local_payload="${line%|*}"; local_payload="${local_payload#*:}" ;; esac
-    # Filter: only forward AUDIO:, MSG:, PING, and GROUP:
+    # Filter: only forward AUDIO:, MSG:, and PING. GROUP: is intentionally
+    # excluded — the relay generates its own GROUP:N broadcasts, and forwarding
+    # client-sent GROUP: would let an unauthenticated peer inject terminal
+    # escape sequences into every participant's terminal (issue #1).
     case "$local_payload" in
         AUDIO:*|MSG:*|PING) ;;
         *) continue ;;
@@ -2303,8 +2364,6 @@ test_audio() {
         audio_deps+=(termux-microphone-record ffmpeg)
     elif [ $IS_MACOS -eq 1 ]; then
         audio_deps+=(rec play)
-    else
-        audio_deps+=(arecord aplay)
     fi
     for dep in "${audio_deps[@]}"; do
         if ! check_dep "$dep"; then
@@ -2312,12 +2371,24 @@ test_audio() {
             missing=1
         fi
     done
+    # Linux needs either the PulseAudio/PipeWire tools (parec/pacat) or ALSA (arecord/aplay)
+    if [ $IS_TERMUX -eq 0 ] && [ $IS_MACOS -eq 0 ]; then
+        if ! { check_dep parec && check_dep pacat; } && \
+           ! { check_dep arecord && check_dep aplay; }; then
+            log_err "No audio tools found — install pulseaudio-utils/libpulse or alsa-utils (option 7)"
+            missing=1
+        fi
+    fi
     if [ $missing -eq 1 ]; then
         return 1
     fi
 
     echo -e "  ${DIM}This will record 3 seconds of audio, encode it with Opus,${NC}"
     echo -e "  ${DIM}and play it back to verify your audio pipeline works.${NC}\n"
+
+    if [ $IS_TERMUX -eq 0 ] && [ $IS_MACOS -eq 0 ]; then
+        echo -e "  ${DIM}Audio backend: $(detect_audio_backend)${NC}\n"
+    fi
 
     mkdir -p "$AUDIO_DIR"
 
@@ -2336,6 +2407,14 @@ test_audio() {
     local raw_size
     raw_size=$(file_size "$raw_file")
     echo -e "  ${DIM}Recorded $raw_size bytes of raw audio${NC}"
+
+    # Step 1b: Play the RAW recording directly (bypasses Opus/encryption).
+    # This isolates capture vs. playback: if you hear yourself here but not in
+    # the final step, the problem is in the codec path; if you hear nothing here,
+    # it's a microphone/capture or speaker/playback issue (see issue #2).
+    echo -ne "  ${YELLOW}● Playing raw recording (pre-codec)...${NC} "
+    audio_play "$raw_file" "$SAMPLE_RATE"
+    echo -e "${GREEN}done${NC}"
 
     # Step 2: Encode with Opus
     echo -ne "  ${YELLOW}● Encoding with Opus at ${OPUS_BITRATE}kbps...${NC} "
@@ -2411,7 +2490,18 @@ show_status() {
     fi
 
     # Audio
-    if { [ $IS_MACOS -eq 1 ] && check_dep rec; } || { [ $IS_MACOS -eq 0 ] && check_dep arecord; } && check_dep opusenc; then
+    local _audio_ok=0
+    if check_dep opusenc; then
+        if [ $IS_MACOS -eq 1 ]; then
+            check_dep rec && _audio_ok=1
+        elif [ $IS_TERMUX -eq 1 ]; then
+            check_dep termux-microphone-record && _audio_ok=1
+        else
+            { check_dep parec && check_dep pacat; } && _audio_ok=1
+            { check_dep arecord && check_dep aplay; } && _audio_ok=1
+        fi
+    fi
+    if [ "$_audio_ok" -eq 1 ]; then
         echo -e "  ${GREEN}●${NC} Audio pipeline ready"
     else
         echo -e "  ${RED}●${NC} Audio dependencies missing"
