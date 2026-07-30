@@ -6,8 +6,32 @@ TerminalPhone is a single, self-contained Bash script that provides anonymous, e
 
 ---
 
+## Who Is This For
+
+- **Privacy-conscious individuals** who want voice conversations without centralized apps, accounts, or phone numbers.
+- **People in censorship or surveillance-heavy environments** who need to route around network blocking or avoid traffic passing through specific jurisdictions (Five/Nine/Fourteen Eyes).
+- **Journalists, activists, and at-risk sources** operating under threat models where being identified as a communicant is itself dangerous.
+- **Small trusted groups** who need ad-hoc secure group calls without relying on a central VoIP provider — and without the relay operator being able to eavesdrop.
+- **Technically self-sufficient users** comfortable with a terminal and familiar with Tor/OPSEC practices.
+
+## Why TerminalPhone
+
+TerminalPhone is not a new cryptographic primitive. It is a careful integration of proven technologies into a single anonymous voice-communication pipeline that doesn't exist as an off-the-shelf combination:
+
+- **Tor hidden services** adapted for real-time voice — a record-then-send model that works around Tor's latency variability instead of fighting it.
+- **Opus codec** tuned for extreme efficiency (16kbps, 8kHz mono) to keep encrypted payloads small enough (~20KB per 10 seconds) to move reliably through Tor.
+- **OpenSSL symmetric encryption** with safer secret handling — secrets passed via file descriptors, never exposed in the process table.
+- **HMAC-SHA256 authentication** with per-message nonces and replay tracking applied to all protocol-level control messages, not just payload.
+- **Termux/Android audio bridging** that brings a Unix-style raw PCM pipeline to Android's sandboxed audio architecture via ffmpeg.
+- **Snowflake diagnostics** surfaced directly in the call UI, so users aren't left guessing during censorship-circumvention connections.
+- **Zero-knowledge relay** for group calls — the relay only touches encrypted payloads via in-memory FIFOs, never touches disk, and structurally cannot decrypt or attribute content.
+
+---
+
 ## Table of Contents
 
+- [Who Is This For](#who-is-this-for)
+- [Why TerminalPhone](#why-terminalphone)
 - [Features](#features)
 - [Installation](#installation)
   - [Linux](#linux)
